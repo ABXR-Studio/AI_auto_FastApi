@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile, Query
 from PIL import Image
 import requests
@@ -10,8 +9,9 @@ from jobs import txt2img, upscale,img2img
 from rq.registry import FinishedJobRegistry
 import io
 import torchaudio
-from audiocraft.models import MusicGen
 from audiocraft.data.audio import audio_write
+from audiocraft.models.musicgen import MusicGen
+from audiocraft.models import AudioGen
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 import time
@@ -22,7 +22,7 @@ from transformers import AutoProcessor, BarkModel
 import soundfile as sf
 from typing import Optional
 from pathlib import Path
-from pydub import AudioSegment 
+from pydub import AudioSegment
 import numpy as np
 from clone_vc import load_codec_model, generate_text_semantic
 from hubert_manager import HuBERTManager
@@ -86,7 +86,7 @@ async def img2img_endpoint(request_body: dict):
       return {"error": "Missing mandatory 'prompt' field in the request."}
    if not init_images:
       return {"error": "Missing mandatory 'init_images' field in the request."}
-   
+
    query = {
       "prompt": request_body.get("prompt"),
       "negative_prompt": request_body.get("negative_prompt", ""),
@@ -194,35 +194,82 @@ async def get_progress():
 
 class MusicRequest(BaseModel):
     prompt: str
-    duration: int = 10
+    duration: float = 10
 
-@app.post("/txt2music")
-async def get_progress(request: Request, request_body: MusicRequest):
-    model = MusicGen.get_pretrained('melody')
-    prompt = request_body.prompt
-    duration = request_body.duration
+@app.post("/generatemusic")
+async def generate_music(request: Request, music_request: MusicRequest):
+    model = MusicGen.get_pretrained('facebook/musicgen-medium')
+    prompt = music_request.prompt
+    duration = music_request.duration
 
     if not prompt:
         return {"error": "Missing mandatory 'prompt' field in the request."}
 
     if duration > 60:
         duration = 60
+    if not duration:
+        duration = 10
 
     model.set_generation_params(duration=duration)
-    wav = model.generate_unconditional(4)
     descriptions = [prompt]
-    wav = model.generate(descriptions)
+    cond_wav = model.generate(descriptions)
 
-    mp4_files = []
-    for idx, one_wav in enumerate(wav):
-      mp4_path = f'output/{idx}'
-      audio_write(mp4_path, one_wav.cpu(), model.sample_rate, strategy="loudness", loudness_compressor=True)
-      mp4_files.append(mp4_path+'.wav')
+    mp3_files = []
+
+    for idx, wav_file in enumerate(cond_wav):
+        mp3_path = f'output/{idx}'
+        audio_write(mp3_path, wav_file.cpu(), sample_rate=model.sample_rate,format='mp3',mp3_rate=320)
+        mp3_files.append(mp3_path + '.mp3')
+
     del model
-    del wav
+    del cond_wav
     torch.cuda.empty_cache()
     gc.collect()
-    return FileResponse(mp4_files[0], media_type="video/mp4")
+
+    return FileResponse(mp3_files[0], media_type="audio/mp3")
+
+
+class AudioRequest(BaseModel):
+    prompt: str
+    duration: float = 10
+
+@app.post("/generateaudio")
+async def generate_audio(request: Request, audio_request: AudioRequest):
+    model = AudioGen.get_pretrained('facebook/audiogen-medium')
+    prompt = audio_request.prompt
+    duration = audio_request.duration
+
+    if not prompt:
+        return {"error": "Missing mandatory 'prompt' field in the request."}
+
+    if duration > 60:
+        duration = 60
+    if not duration:
+        duration = 10
+
+    model.set_generation_params(duration=duration)
+    descriptions = [prompt]
+    cond_wav = model.generate(descriptions)
+
+    mp3_files = []
+
+    for idx, wav_file in enumerate(cond_wav):
+        mp3_path = f'output/{idx}'
+        audio_write(mp3_path, wav_file.cpu(), sample_rate=model.sample_rate,strategy="loudness", loudness_compressor=True,format='mp3',mp3_rate=320)
+        mp3_files.append(mp3_path + '.mp3')
+
+    del model
+    del cond_wav
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    return FileResponse(mp3_files[0], media_type="audio/mp3")
+
+
+
+
+
+
 
 @app.get('/png-info')
 async def png_info(payload: dict):
@@ -239,7 +286,7 @@ class AudioRequest(BaseModel):
       prompt: str
       voice_preset: Optional[str] = None
 
-@app.post("/generate_audio")
+@app.post("/generate_bark")
 def generate_audio_endpoint(request: AudioRequest):
 
       # Bark AI config
@@ -279,7 +326,7 @@ async def generate_npz(file: UploadFile = File(...), voice_name: str = Query(...
       with open(file_path, 'wb') as buffer:
          buffer.write(file.file.read())
 
-      # Convert MP3 to WAV if necessary       
+      # Convert MP3 to WAV if necessary
       if file_path.suffix.lower() == '.mp3':
          audio = AudioSegment.from_mp3(file_path)
          wav_path = file_path.with_suffix('.wav')
